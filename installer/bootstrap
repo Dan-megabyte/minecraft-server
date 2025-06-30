@@ -5,6 +5,9 @@ set -uo pipefail
 umask 077
 TTY="/dev/$(ps -p $$ -o tty=)"
 
+INSTALL_DIR='/var/lib/minecraft'
+DEPLOY_DIR='deploy'
+
 ################################################################
 # Helper functions
 
@@ -29,6 +32,43 @@ function install_file() {
 	cp    "$1" "$2" || die "Could not copy '$1' to '$2'"
 	chown "$3" "$2" || die "Could not chown '$2'"
 	chmod "$4" "$2" || die "Could not chmod '$2'"
+}
+
+# $1: Variable to store result array into
+# $2: Prompt (string)
+function ask_array() {
+	# Indirectly reference result array
+	declare -n ref=$1
+	ref=()
+
+	# Prompt the user for their choice(s)
+	flush_stdin
+	read -r -p "$2" ref < $TTY || die "Error in read"
+
+	# Check if input is empty (user selected none)
+	if [ -z "$ref" ]; then
+		ask_array $1 $2
+	fi
+}
+
+# $1: Directory FROM
+# $2: Directory TO (NO END SLASH)
+function install_folder() {
+	mkdir -p -m700 "$2" || die "Could not create directory '$2'"
+	chown minecraft: "$2" || die "Could not chown directory '$2'"
+	for d in $(find "$1" -type d -printf '%P\n'); do
+		mkdir -p -m700 "$2/$d" || die "Could not create directory '$d'"
+		chown minecraft: "$2/$d" || die "Could not chown directory '$d'"
+	done
+
+	for f in $(find "$1" -type f -printf '%P\n'); do
+		# If the file ends in .sh, make it executable
+		if [[ "$f" == *.sh ]]; then
+			install_file "$1/$f" "$2/$f" minecraft: 700
+		else
+			install_file "$1/$f" "$2/$f" minecraft: 600
+		fi
+	done
 }
 
 ################################################################
@@ -80,53 +120,50 @@ ask "Do you agree to the EULA?" \
 
 if ! getent passwd minecraft &>/dev/null; then
 	status "Creating minecraft user"
-	useradd --system --home-dir /var/lib/minecraft --no-create-home minecraft \
+	useradd --system --home-dir "$INSTALL_DIR" --no-create-home minecraft \
 		|| die "Could not create user 'minecraft'"
 fi
 
-mkdir -p /var/lib/minecraft
-chmod 700 /var/lib/minecraft
-chown minecraft: /var/lib/minecraft
+mkdir -p "$INSTALL_DIR"
+chmod 700 "$INSTALL_DIR"
+chown minecraft: "$INSTALL_DIR"
 
 
 ################################################################
 # Setup repository
 
-if [[ -e /var/lib/minecraft/deploy ]]; then
-	echo "[33mThe deploy directory /var/lib/minecraft/deploy already exists."
-	echo "You can still run the installer again, but it may overwrite some"
-	echo "configuration files if you edited them in the meantime.[m"
+if [[ -e "$INSTALL_DIR/$DEPLOY_DIR" ]]; then
+	echo "[33mThe deploy directory $INSTALL_DIR/$DEPLOY_DIR already exists."
+	echo "You can still run the installer again, but it will overwrite your"
+	echo "plugin update scripts and some configuration files if you edited"
+	echo "them in the meantime.[m"
 	ask "Are you sure you want to continue?" \
 		|| die "Installation aborted."
 fi
 
-cd /var/lib/minecraft \
-	|| die "Could not change into /var/lib/minecraft"
+cd $INSTALL_DIR \
+	|| die "Could not change into $INSTALL_DIR"
 
-if [[ -e deploy ]]; then
+if [[ -e "$DEPLOY_DIR" ]]; then
 	status "Updating deploy repository"
-	runuser -u minecraft -- git -C deploy pull \
+	runuser -u minecraft -- git -C "$DEPLOY_DIR" pull \
 		|| die "Could not pull repository"
 else
 	status "Cloning deploy repository"
-	runuser -u minecraft -- git clone "https://github.com/oddlama/minecraft-server" deploy \
+	runuser -u minecraft -- git clone "https://github.com/oddlama/minecraft-server" "$DEPLOY_DIR" \
 		|| die "Could not clone repository"
 fi
 
-cd deploy \
+cd "$DEPLOY_DIR" \
 	|| die "Could not change into deploy directory"
 
+#####################################################
 status "Configuring server"
+#####################################################
+
+install_folder installer/default_config/server "$INSTALL_DIR/$DEPLOY_DIR/server"
+
 install_file <(echo "eula=true") server/eula.txt minecraft: 600
-
-for d in $(find contrib/default_config -type d -printf '%P\n'); do
-	mkdir -p -m700 "$d" || die "Could not create directory '$d'"
-	chown minecraft: "$d" || die "Could not chown directory '$d'"
-done
-
-for f in $(find contrib/default_config -type f -printf '%P\n'); do
-	install_file contrib/default_config/"$f" "$f" minecraft: 600
-done
 
 VELOCITYSECRET=$(openssl rand -base64 16) \
 	|| die "Could not generate velocity secret"
@@ -177,15 +214,18 @@ if ask "Increase view-distance to 15 chunks?"; then
 fi
 
 echo
-runuser -u minecraft -- ./update.sh < "$TTY" \
-	|| die "Could not update server files"
+
+if ask "Download all initial server files through update.sh?"; then
+	runuser -u minecraft -- ./update.sh < "$TTY" \
+		|| echo "Could not update server files, you need to manually do that later"
+fi
 
 
 ################################################################
 # Install systemd services
 
 status "Installing service files"
-./contrib/install.sh < "$TTY" \
+./installer/systemd/install.sh < "$TTY" \
 	|| die "Error while installing service files"
 
 
@@ -211,6 +251,12 @@ following command when you are ready to start the server:
 "
 fi
 
+################################################################
+# Install minecraft-attach tool
+
+install_file "installer/minecraft-attach" \
+	"/usr/bin/minecraft-attach" \
+	root: 755
 
 ################################################################
 # Success message
