@@ -21,7 +21,7 @@ function install_file() {
 	chmod "$4" "$2" || die "Could not chmod '$2'"
 }
 
-for name in server proxy; do
+for name in server@ proxy; do
 	install_file "./minecraft-$name.service" \
 		"/lib/systemd/system/minecraft-$name.service" \
 		root: 644
